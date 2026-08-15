@@ -10,3 +10,4 @@ coverage/
 .vscode/
 *.tsbuildinfo
 docs/superpowers/
+.worktrees/
