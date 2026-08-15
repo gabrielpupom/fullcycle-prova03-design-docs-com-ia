@@ -130,6 +130,16 @@ A geração candidata usa 32 bytes aleatórios e retorno base64url apenas na cri
 rotação. Cifra em repouso, fonte da chave mestra e política de rotação dessa chave são
 `QUESTÃO_ABERTA: FDD-OPEN-SECRET-STORAGE-001`; não devem ser substituídas por texto puro.
 
+#### Campo auxiliar proposto em `Order`
+
+Adicionar `webhookSequence BigInt @default(0)` a `Order`. Cada `changeStatus` aceito
+incrementa esse contador atomicamente na mesma atualização SQL do status; o valor
+retornado é a ordem causal daquele evento. O incremento participa do rollback e não usa
+timestamp ou UUID como desempate. Mudanças sem endpoint inscrito ainda incrementam o
+contador e podem produzir lacunas nas sequências presentes na outbox; lacunas não
+representam perda. Campo, tipo e mecanismo são
+`PROPOSTA_DERIVADA: FDD-PROP-ORDER-SEQUENCE-001 — EM REVISÃO`.
+
 #### `WebhookOutbox`
 
 Cada linha é a unidade de trabalho de **um endpoint**, não o evento lógico. Isso separa
@@ -142,21 +152,24 @@ o `eventId` compartilhado da identidade `id` por endpoint
 | `eventId` | UUID lógico da mudança, compartilhado por todas as linhas do fan-out e usado em `X-Event-Id`. |
 | `webhookEndpointId` | FK para `WebhookEndpoint`; compõe unicidade com `eventId`. |
 | `customerId`, `orderId` | UUIDs denormalizados para filtro, auditoria e head-of-line. |
+| `orderSequence` | Sequência causal monotônica de `Order.webhookSequence`, compartilhada por todo o fan-out lógico. |
 | `eventType` | Candidato fixo `order.status_changed`. |
 | `payload` | Snapshot JSON imutável renderizado na inserção. |
 | `endpointUrl` | Snapshot da URL usada pela unidade; evita que PATCH mude retroativamente o destino. |
 | `secretVersion` | Versão candidata para resolver a secret na assinatura; depende da decisão de grace period. |
 | `status` | `PENDING`, `PROCESSING`, `RETRY_WAIT`, `SUCCEEDED`, `DEAD_LETTERED` ou `CANCELLED`. |
-| `attemptInCycle` | Chamadas já iniciadas no ciclo inicial ou no ciclo de replay. |
+| `attemptInCycle` | Chamadas iniciadas no ciclo; incrementado atomicamente com a criação de `WebhookDelivery`, antes da rede. Uma tentativa `UNKNOWN` consome essa posição. |
 | `replayCycle` | Zero no fluxo inicial; incrementado em cada replay aceito. |
 | `nextAttemptAt` | Instante de elegibilidade para tentativa inicial/retry. |
-| `leaseOwner`, `leaseExpiresAt` | Claim recuperável pelo worker; ambos opcionais fora de `PROCESSING`. |
+| `leaseOwner`, `leaseToken`, `leaseExpiresAt` | Claim recuperável; `leaseToken` é UUID novo por claim e impede finalização obsoleta. |
+| `cancelRequestedAt` | Instante opcional em que DELETE pediu cancelamento de uma unidade já `PROCESSING`. |
 | `lastErrorCode`, `lastErrorMessage` | Último diagnóstico sanitizado, sem secret/assinatura. |
-| `occurredAt`, `createdAt`, `updatedAt`, `completedAt` | Ordenação, lag e auditoria. |
+| `occurredAt`, `createdAt`, `updatedAt`, `completedAt` | Tempos de negócio, lag e auditoria; não definem causalidade. |
 
 Restrições/índices propostos: `@@unique([eventId, webhookEndpointId])`,
+`@@unique([webhookEndpointId, orderId, orderSequence])`,
 `@@index([status, nextAttemptAt, createdAt])`,
-`@@index([orderId, occurredAt, id])`, `@@index([leaseExpiresAt])` e
+`@@index([orderId, orderSequence, status])`, `@@index([leaseExpiresAt])` e
 `@@index([webhookEndpointId, createdAt])`. Os IDs da outbox são UUIDs
 `[FECHADO: EV-TR-020-A]`.
 
@@ -172,8 +185,9 @@ unidade estável continua sendo `WebhookOutbox.id`.
 | `eventId`, `webhookEndpointId` | IDs denormalizados para correlação. |
 | `attemptNumber` | Sequência global crescente dentro da unidade, inclusive após replay. |
 | `attemptInCycle`, `replayCycle` | Posição na agenda e ciclo de replay. |
+| `leaseToken` | Token do claim que iniciou a chamada; usado no compare-and-set da finalização/reclaim. |
 | `startedAt`, `finishedAt`, `durationMs` | Tempos da chamada; `finishedAt` pode ser nulo após crash. |
-| `outcome` | `SUCCEEDED`, `RETRYABLE_FAILURE`, `PERMANENT_FAILURE` ou `UNKNOWN`. |
+| `outcome` | `SUCCEEDED`, `RETRYABLE_FAILURE`, `PERMANENT_FAILURE` ou `UNKNOWN`; `UNKNOWN` indica chamada possivelmente enviada e consome orçamento. |
 | `httpStatus` | Status recebido, se houver. |
 | `responseBody`, `responseTruncated` | Resposta sanitizada; proposta de armazenar no máximo 16 KiB e marcar truncamento. |
 | `errorCode`, `errorMessage` | Classificação interna e mensagem sanitizada para falhas HTTP/rede. |
@@ -211,9 +225,12 @@ o payload, o motivo e o timestamp são requisitos fechados
 | `PROCESSING` | `SUCCEEDED` | Resultado classificado como sucesso. |
 | `PROCESSING` | `RETRY_WAIT` | Falha retentável com retry disponível. |
 | `PROCESSING` | `DEAD_LETTERED` | Falha permanente ou política esgotada, com criação atômica da DLQ. |
-| `PROCESSING` com lease expirado | `PENDING` | Recuperação após crash; tentativa incompleta vira `UNKNOWN`. |
+| `PROCESSING` sem tentativa criada e lease expirado | `PENDING` | Crash antes da rede; não consome chamada. Se houver cancelamento solicitado, vai a `CANCELLED`. |
+| `PROCESSING` com tentativa criada e lease expirado | `RETRY_WAIT` | Tentativa vira `UNKNOWN`, consome chamada e aplica a espera da próxima posição, se ainda houver orçamento. |
+| `PROCESSING` na última chamada e lease expirado | `DEAD_LETTERED` | Tentativa vira `UNKNOWN`; cria DLQ sem iniciar chamada adicional. |
+| `PROCESSING` com `cancelRequestedAt` | `CANCELLED` | Finalização ou reclaim registra o resultado/`UNKNOWN`, mas não agenda retry nem DLQ. |
 | `PENDING` / `RETRY_WAIT` | `CANCELLED` | Remoção lógica do endpoint, conforme proposta de DELETE. |
-| `DEAD_LETTERED` | `PENDING` | Replay ADMIN auditado; novo ciclo, mesmos `eventId` e `outboxId`. |
+| `DEAD_LETTERED` | `PENDING` | Replay ADMIN auditado somente com endpoint existente e ativo; novo ciclo, mesmos `eventId` e `outboxId`. |
 
 Toda a tabela é `PROPOSTA_DERIVADA: FDD-PROP-STATES-001 — EM REVISÃO`.
 
@@ -222,28 +239,32 @@ Toda a tabela é `PROPOSTA_DERIVADA: FDD-PROP-STATES-001 — EM REVISÃO`.
 1. `OrderService.changeStatus` mantém a validação por `canTransition` e os efeitos de
    estoque definidos por `shouldDebitStock`/`shouldReplenishStock`
    `[CÓDIGO: EV-CODE-003-A a EV-CODE-003-C]`.
-2. Dentro do callback existente de `$transaction`, ele atualiza pedido e histórico e
-   consulta endpoints ativos do `order.customerId` inscritos no novo `toStatus`.
+2. Dentro do callback existente de `$transaction`, ele atualiza status e incrementa
+   `Order.webhookSequence` atomicamente na mesma operação, usa o valor retornado como
+   `orderSequence`, cria o histórico e consulta endpoints ativos do `order.customerId`
+   inscritos no novo `toStatus`. Rollback desfaz status, sequência e histórico
+   `[PROPOSTA_DERIVADA: FDD-PROP-ORDER-SEQUENCE-001 — EM REVISÃO]`.
 3. Sem endpoint inscrito, nenhuma linha de outbox é inserida
    `[FECHADO: EV-TR-013-A]`.
-4. Com um ou mais endpoints, gera-se um `eventId` lógico e um timestamp, e o payload é
-   renderizado uma única vez a partir do estado confirmado dentro da transação. O
-   snapshot não é reconstruído durante retry `[FECHADO: EV-TR-020-B;
-   PROPOSTA_DERIVADA: EV-PROP-FANOUT-001]`.
+4. Com um ou mais endpoints, gera-se um `eventId` lógico e um timestamp, associa-se o
+   `orderSequence` já alocado e renderiza-se o payload uma única vez a partir do estado
+   confirmado dentro da transação. O snapshot não é reconstruído durante retry
+   `[FECHADO: EV-TR-020-B; PROPOSTA_DERIVADA: EV-PROP-FANOUT-001,
+   FDD-PROP-ORDER-SEQUENCE-001 — EM REVISÃO]`.
 5. Mede-se o corpo serializado em UTF-8. A proposta interpreta 64 KB como 65.536 bytes;
    acima disso, lança `WEBHOOK_PAYLOAD_TOO_LARGE`, não trunca e provoca rollback de
    pedido, histórico, estoque e outbox `[FECHADO: EV-TR-009-B, EV-TR-017-A;
    PROPOSTA_DERIVADA: FDD-PROP-64K-001 — EM REVISÃO]`.
-6. Para cada endpoint inscrito, cria-se uma `WebhookOutbox` com `id` próprio, o mesmo
-   `eventId`, payload idêntico e snapshots de URL/configuração. Uma falha em qualquer
-   inserção aborta todo o fan-out e a transação
+6. Para cada endpoint inscrito, cria-se uma `WebhookOutbox` com `id` próprio, os mesmos
+   `eventId` e `orderSequence`, payload idêntico e snapshots de URL/configuração. Uma
+   falha em qualquer inserção aborta todo o fan-out e a transação
    `[PROPOSTA_DERIVADA: EV-PROP-FANOUT-002, EV-PROP-FANOUT-003]`.
 7. Somente depois do commit o worker pode observar as linhas. Nenhuma chamada HTTP é
    feita pelo request de mudança de status `[FECHADO: EV-TR-003-A, EV-TR-003-C]`.
 
 O helper candidato
-`publishWebhookEvent(tx, { order, fromStatus, toStatus, changedAt, reason })` deve
-receber o `Prisma.TransactionClient`; nome e assinatura são
+`publishWebhookEvent(tx, { order, orderSequence, fromStatus, toStatus, changedAt,
+reason })` deve receber o `Prisma.TransactionClient`; nome e assinatura são
 `PROPOSTA_DERIVADA: EV-TR-017-B — EM REVISÃO`.
 
 ### Fluxo 2 — polling, claim e entrega
@@ -252,32 +273,42 @@ receber o `Prisma.TransactionClient`; nome e assinatura são
    segundos e procura o trabalho elegível mais antigo
    `[FECHADO: EV-TR-004-A, EV-TR-004-B]`.
 2. O claim candidato ocorre em transação e muda exatamente uma linha para `PROCESSING`
-   somente se ela continuar elegível. Registra `leaseOwner` e `leaseExpiresAt`; os
-   detalhes estão em Estratégias de resiliência.
-3. Antes da rede, o worker cria `WebhookDelivery` com novo UUID e incrementa
-   `attemptInCycle`. `eventId` e `WebhookOutbox.id` permanecem estáveis em retry
-   `[PROPOSTA_DERIVADA: EV-PROP-FANOUT-004]`.
+   somente se ela continuar elegível. Registra `leaseOwner`, `leaseToken` e
+   `leaseExpiresAt`; os detalhes estão em Estratégias de resiliência.
+3. Antes da rede, uma transação condicionada ao `leaseToken` cria `WebhookDelivery` com
+   novo UUID e incrementa `attemptInCycle`. A partir desse commit, a chamada está
+   consumida mesmo que seu resultado termine `UNKNOWN`; `eventId` e `WebhookOutbox.id`
+   permanecem estáveis em retry `[PROPOSTA_DERIVADA: EV-PROP-FANOUT-004;
+   FDD-PROP-UNKNOWN-BUDGET-001 — EM REVISÃO]`.
 4. O worker serializa uma vez o snapshot, resolve a secret, calcula a assinatura sobre
    os mesmos bytes que enviará e executa POST HTTPS com timeout total candidato de dez
    segundos. Bytes/formato e operação da secret continuam em revisão.
-5. O resultado é classificado pela matriz outbound proposta. A finalização atualiza a
-   tentativa e a outbox em uma transação curta: sucesso, agendamento de retry ou criação
-   de DLQ.
-6. Uma falha ao persistir o resultado não autoriza assumir sucesso. Após o lease, a
-   unidade volta ao fluxo e pode gerar duplicata, preservando `X-Event-Id`, como exige a
-   semântica at-least-once `[FECHADO: EV-TR-010-A a EV-TR-010-C]`.
+5. O resultado é classificado pela matriz outbound proposta. A finalização faz
+   compare-and-set pelo `leaseToken`, registra o resultado real da tentativa e atualiza
+   a outbox em uma transação curta. Se `cancelRequestedAt` estiver preenchido, o estado
+   final é `CANCELLED`, sem retry/DLQ, mesmo quando a chamada teve sucesso ou falhou.
+6. Uma falha ao persistir o resultado não autoriza assumir sucesso. Após o lease, o
+   reclaim aplica o orçamento de `UNKNOWN` descrito adiante e pode gerar duplicata,
+   preservando `X-Event-Id`, como exige a semântica at-least-once
+   `[FECHADO: EV-TR-010-A a EV-TR-010-C; PROPOSTA_DERIVADA:
+   FDD-PROP-UNKNOWN-BUDGET-001 — EM REVISÃO]`.
 
 ### Fluxo 3 — DLQ e replay auditado
 
 1. Falha permanente proposta ou esgotamento da agenda cria `WebhookDeadLetter` e move a
    outbox para `DEAD_LETTERED` na mesma transação
    `[FECHADO: EV-TR-007-A, EV-TR-007-B]`.
-2. Um usuário `ADMIN` solicita replay, informando o ID da DLQ. O serviço valida que ela
-   está `OPEN`, registra `req.user.id`, instante e motivo e a marca `REPLAYED`
-   `[FECHADO: EV-TR-015-A, EV-TR-015-B]`.
-3. Na mesma transação, a outbox volta a `PENDING`, incrementa `replayCycle`, zera
-   `attemptInCycle`, limpa lease e recebe `nextAttemptAt = now`. O envio permanece
-   assíncrono `[FECHADO: EV-TR-007-C; PROPOSTA_DERIVADA: EV-PROP-FANOUT-005]`.
+2. Um usuário `ADMIN` solicita replay, informando o ID da DLQ. Na mesma transação e com
+   locks/updates condicionais, o serviço valida DLQ `OPEN`, outbox `DEAD_LETTERED` e
+   endpoint existente, `active=true` e `deletedAt=null`. Endpoint removido/inativo causa
+   `409 WEBHOOK_REPLAY_ENDPOINT_INACTIVE`, mantém a DLQ `OPEN` e não cria ciclo
+   `[FECHADO: EV-TR-015-A; PROPOSTA_DERIVADA:
+   FDD-PROP-REPLAY-ACTIVE-ENDPOINT-001 — EM REVISÃO]`.
+3. Quando elegível, registra `req.user.id`, instante e motivo, marca a DLQ `REPLAYED` e
+   faz a outbox voltar a `PENDING`; incrementa `replayCycle`, zera `attemptInCycle`,
+   limpa lease/`cancelRequestedAt` e recebe `nextAttemptAt = now`. O envio permanece
+   assíncrono `[FECHADO: EV-TR-007-C, EV-TR-015-B; PROPOSTA_DERIVADA:
+   EV-PROP-FANOUT-005]`.
 4. O replay preserva `eventId` e `outboxId`, mas a próxima chamada cria novo
    `WebhookDelivery.id`. Se falhar novamente até o limite, cria outra linha de DLQ para
    o novo ciclo.
@@ -354,12 +385,18 @@ ownership por customer a ser inferida silenciosamente.
 - **Request:** path `id` UUID; sem body.
 - **Response `204`:** sem corpo.
 - **Status codes:** `204`; `400 VALIDATION_ERROR`; `401`; `404
-  WEBHOOK_ENDPOINT_NOT_FOUND`; `409 WEBHOOK_ENDPOINT_DELETE_CONFLICT` se houver estado
-  que não possa ser cancelado com segurança.
-- **Semântica proposta:** remoção lógica (`active=false`, `deletedAt=now`) impede novos
-  eventos e cancela outboxes `PENDING`/`RETRY_WAIT` na mesma transação. Uma chamada já
-  em `PROCESSING` pode terminar; o resultado é auditado. Esta política de cancelar
-  pendências é `PROPOSTA_DERIVADA: FDD-PROP-DELETE-001 — EM REVISÃO`.
+  WEBHOOK_ENDPOINT_NOT_FOUND`.
+- **Semântica proposta:** na mesma transação, remoção lógica (`active=false`,
+  `deletedAt=now`) impede novos eventos, muda outboxes `PENDING`/`RETRY_WAIT` para
+  `CANCELLED` e preenche `cancelRequestedAt` nas `PROCESSING`. DELETE não promete
+  interromper a chamada já em voo: finalização registra seu resultado real e conclui a
+  outbox como `CANCELLED`, sem retry/DLQ; lease expirado registra `UNKNOWN` e também
+  cancela sem nova chamada. DLQs existentes permanecem auditáveis, mas replay é
+  recusado enquanto o endpoint estiver removido/inativo. Se finalização e DELETE
+  concorrerem, updates condicionais serializam dois resultados válidos: finalização
+  anterior pode produzir `RETRY_WAIT`, que DELETE cancela; DELETE anterior define
+  `cancelRequestedAt`, que a finalização respeita. Esta política é
+  `PROPOSTA_DERIVADA: FDD-PROP-DELETE-001 — EM REVISÃO`.
 
 ### POST /api/v1/webhooks/:id/rotate-secret — PROPOSTA_DERIVADA
 
@@ -403,11 +440,14 @@ ownership por customer a ser inferida silenciosamente.
 - **Response `202`:** objeto com `deadLetterId`, `outboxId` e `eventId` UUID,
   `status="PENDING"` e `replayCycle` inteiro incrementado.
 - **Status codes:** `202`; `400 VALIDATION_ERROR`; `401`; `403`; `404
-  WEBHOOK_DLQ_NOT_FOUND`; `409 WEBHOOK_REPLAY_CONFLICT`; `500 WEBHOOK_REPLAY_FAILED`.
+  WEBHOOK_DLQ_NOT_FOUND`; `409 WEBHOOK_REPLAY_CONFLICT` ou
+  `WEBHOOK_REPLAY_ENDPOINT_INACTIVE`; `500 WEBHOOK_REPLAY_FAILED`.
 - **Semântica:** registra o ID de `req.user`, preserva identidades e recoloca a unidade
   como pendente, sem chamada HTTP síncrona `[FECHADO: EV-TR-007-C, EV-TR-015-B;
-  PROPOSTA_DERIVADA: EV-PROP-FANOUT-005]`. Atualização condicional impede dois replays da
-  mesma linha `OPEN`.
+  PROPOSTA_DERIVADA: EV-PROP-FANOUT-005]`. A transação relê endpoint, DLQ e outbox:
+  endpoint removido/inativo deixa a DLQ `OPEN` e retorna 409; atualização condicional
+  impede dois replays da mesma linha `OPEN`. DELETE concorrente vence antes e bloqueia o
+  replay, ou vence depois e cancela a outbox recém-recolocada.
 
 ### Chamada outbound para o endpoint do cliente
 
@@ -489,7 +529,7 @@ Esses são os quatro headers de webhook definidos, além do `Content-Type`. Prop
 | --- | --- | --- |
 | `200–299` | sucesso | `SUCCEEDED`; não retentar. |
 | `300–399` | permanente, sem seguir redirect | DLQ imediata; evita reenviar assinatura/payload a destino não validado. |
-| `408`, `425`, `429` | retentável | Agenda retry; `Retry-After` ainda não prevalece sobre a tabela aprovada. |
+| `408`, `425`, `429` | retentável | Agenda retry; uso e precedência de `Retry-After` permanecem em revisão junto da agenda candidata. |
 | `400`, `401`, `403`, `404`, `405`, `410`, `422` | permanente | DLQ imediata. |
 | Demais `4xx` | permanente | DLQ imediata. |
 | `500–599` | retentável | Agenda retry; DLQ ao esgotar. |
@@ -523,14 +563,14 @@ classes/erros de domínio quando a matriz alvo for implementada.
 | `WEBHOOK_SECRET_UNAVAILABLE` | Worker não resolve versão/material de assinatura | falha operacional; classificação depende do grace period | `INTERNAL_SERVER_ERROR` |
 | `WEBHOOK_SECRET_ROTATION_CONFLICT` | Rotação concorrente ou durante grace ativo, se proposta aprovada | 409 | `CONFLICT` |
 | `WEBHOOK_ENDPOINT_DISABLED` | Operação incompatível com endpoint inativo | 409 | `CONFLICT` |
-| `WEBHOOK_ENDPOINT_DELETE_CONFLICT` | Remoção não pode cancelar estado com segurança | 409 | `CONFLICT` |
 | `WEBHOOK_DELIVERY_FAILED` | Falha outbound genérica já classificada | histórico/log; retry ou DLQ | não existe |
 | `WEBHOOK_DELIVERY_TIMEOUT` | Dez segundos excedidos | histórico/log e retry | não existe |
 | `WEBHOOK_DELIVERY_HTTP_ERROR` | HTTP fora da classe de sucesso | histórico/log; efeito pela matriz em revisão | não existe |
-| `WEBHOOK_DELIVERY_LEASE_EXPIRED` | Crash/lease expirado deixa resultado incerto | tentativa `UNKNOWN`, nova entrega possível | não existe |
+| `WEBHOOK_DELIVERY_LEASE_EXPIRED` | Lease expira depois da criação da tentativa | `UNKNOWN` consome chamada; retry com espera, DLQ no teto ou cancelamento solicitado | não existe |
 | `WEBHOOK_DLQ_WRITE_FAILED` | Falha ao persistir dead letter | mantém/reclama unidade; alerta crítico | não existe |
 | `WEBHOOK_DLQ_NOT_FOUND` | ID de dead letter inexistente | 404 | `NOT_FOUND` |
 | `WEBHOOK_REPLAY_CONFLICT` | DLQ já reprocessada ou claim concorrente | 409 | `CONFLICT` |
+| `WEBHOOK_REPLAY_ENDPOINT_INACTIVE` | Replay referencia endpoint removido ou inativo | 409; DLQ permanece `OPEN` | `CONFLICT` |
 | `WEBHOOK_REPLAY_FAILED` | Transação de replay falha | 500, sem estado parcial | `INTERNAL_SERVER_ERROR` |
 
 Status, classes e mapeamentos desta tabela são
@@ -563,21 +603,54 @@ imediatas e servem para teste verificável.
 `nextAttemptAt` é calculado a partir do término da tentativa anterior. Uma falha
 classificada como permanente pode ir à DLQ antes da sexta chamada, se a matriz de
 classificação for aprovada. Até reconciliar a contradição, a tabela não deve ser
-codificada como regra definitiva.
+codificada como regra definitiva. A proposta inicial ignora `Retry-After` e usa os
+intervalos candidatos acima; essa precedência também é
+`PROPOSTA_DERIVADA: FDD-PROP-RETRY-AFTER-001 — EM REVISÃO`.
+
+### `UNKNOWN` e orçamento automático — PROPOSTA_DERIVADA, EM REVISÃO
+
+Na recomendação de seis chamadas, o teto vale por `replayCycle`. A criação de
+`WebhookDelivery` e o incremento de `attemptInCycle` acontecem na mesma transação, antes
+da rede. Se essa linha existe quando o lease expira, não é possível provar que o request
+não saiu; portanto, `UNKNOWN` **consome a chamada** e nunca devolve a posição ao
+orçamento `[PROPOSTA_DERIVADA: FDD-PROP-UNKNOWN-BUDGET-001 — EM REVISÃO]`.
+
+| Tentativa que fica `UNKNOWN` | Próxima ação candidata após reclaim |
+| ---: | --- |
+| 1 | `RETRY_WAIT`; chamada 2 elegível em `leaseExpiresAt + 1 min`. |
+| 2 | `RETRY_WAIT`; chamada 3 elegível em `leaseExpiresAt + 5 min`. |
+| 3 | `RETRY_WAIT`; chamada 4 elegível em `leaseExpiresAt + 30 min`. |
+| 4 | `RETRY_WAIT`; chamada 5 elegível em `leaseExpiresAt + 2 h`. |
+| 5 | `RETRY_WAIT`; chamada 6 elegível em `leaseExpiresAt + 12 h`. |
+| 6 | `DEAD_LETTERED`; cria DLQ com `WEBHOOK_DELIVERY_LEASE_EXPIRED`, sem chamada 7. |
+
+Se o reclaim ocorrer depois de `nextAttemptAt`, a unidade fica elegível imediatamente;
+ele não acrescenta uma segunda espera. Se o claim expirou **sem** `WebhookDelivery`
+associada ao `leaseToken`, nenhuma chamada foi iniciada: `attemptInCycle` não mudou e a
+unidade pode voltar a `PENDING` sem consumir orçamento. Um replay administrativo aceito
+abre novo ciclo e zera `attemptInCycle`; ele não altera a contagem histórica de
+`WebhookDelivery`. Cancelamento solicitado tem precedência sobre a tabela: registra
+`UNKNOWN`, se houver tentativa, e conclui `CANCELLED`, sem retry ou DLQ.
 
 ### Ordering e head-of-line — PROPOSTA_DERIVADA, EM REVISÃO
 
 O requisito busca ordem por `order_id` no single-worker, mas `createdAt` sozinho não
 resolve o evento anterior em backoff `[FECHADO: EV-TR-005-A; QUESTÃO_ABERTA:
 EV-AMB-001]`. A proposta é head-of-line por pedido
-`[PROPOSTA_DERIVADA: EV-PROP-ORDER-001]`:
+`[PROPOSTA_DERIVADA: EV-PROP-ORDER-001, FDD-PROP-ORDER-SEQUENCE-001 — EM REVISÃO]`:
 
-- uma unidade é elegível somente se não existir para o mesmo `orderId` uma unidade mais
-  antiga em `PENDING`, `PROCESSING` ou `RETRY_WAIT`;
-- a ordem estável usa `(occurredAt, id)`; outro pedido continua elegível e não sofre
-  bloqueio global;
+- `Order.webhookSequence` é incrementado atomicamente junto do status; todas as unidades
+  do mesmo evento copiam o mesmo `orderSequence`. Igualdade de timestamp e UUIDs
+  aleatórios não participam da causalidade;
+- uma unidade da sequência N é elegível somente se não existir, para o mesmo `orderId`,
+  unidade com `orderSequence < N` em `PENDING`, `PROCESSING` ou `RETRY_WAIT`;
+- todas as unidades do fan-out da mesma sequência N podem avançar entre si, mas a
+  sequência N+1 só é liberada quando **todas** as unidades anteriores chegam a estado
+  terminal (`SUCCEEDED`, `DEAD_LETTERED` ou `CANCELLED`);
+- entre pedidos diferentes, `createdAt` pode priorizar o claim mais antigo sem prometer
+  ordering global;
 - se o evento A falhar e aguardar 30 minutos, o evento B posterior do mesmo pedido fica
-  bloqueado até A chegar a `SUCCEEDED` ou `DEAD_LETTERED`;
+  bloqueado até todas as unidades de A chegarem a estado terminal;
 - replay de A depois de DLQ pode ocorrer após B já ter sido entregue; replay não promete
   restaurar a ordem histórica.
 
@@ -588,23 +661,50 @@ ordering durante backoff permanece questão aberta e não pode ser anunciado aos
 
 Lease não foi fechado na reunião `[PROPOSTA_DERIVADA: EV-PROP-FANOUT-006]`. A proposta
 inicial usa lease de **30 segundos**, superior ao timeout outbound de dez segundos, com
-`leaseOwner` único por processo:
+`leaseOwner` único por processo e `leaseToken` UUID único por claim:
 
-1. Em transação curta, selecionar a unidade mais antiga elegível e executar update
-   condicional para `PROCESSING`, `leaseOwner=<worker-id>` e
-   `leaseExpiresAt=now+30s`. Em MySQL 8, `SELECT ... FOR UPDATE SKIP LOCKED` é candidato;
-   a consulta Prisma/raw exata deve ter teste de concorrência.
-2. Criar a tentativa antes do envio. Enquanto a chamada estiver ativa, somente o dono
-   do lease pode finalizá-la.
-3. Na inicialização e em cada poll, reclaimar `PROCESSING` com lease expirado: marcar a
-   tentativa sem `finishedAt` como `UNKNOWN`/`WEBHOOK_DELIVERY_LEASE_EXPIRED`, limpar o
-   lease e tornar a outbox `PENDING`.
-4. Se o crash ocorreu depois de o cliente processar, a nova chamada é duplicata. Ela
+1. Em transação curta, selecionar uma unidade sem `orderSequence` menor ativa para o
+   mesmo pedido; entre pedidos elegíveis, priorizar a mais antiga por `createdAt`.
+   Executar update condicional para `PROCESSING`, `leaseOwner=<worker-id>`,
+   `leaseToken=<uuid>` e `leaseExpiresAt=now+30s`. Em MySQL 8,
+   `SELECT ... FOR UPDATE SKIP LOCKED` é candidato; a consulta Prisma/raw exata deve ter
+   teste de concorrência.
+2. Criar a tentativa e incrementar `attemptInCycle` atomicamente antes do envio. A
+   finalização só atualiza a unidade se status e `leaseToken` ainda coincidirem; um
+   worker obsoleto pode registrar log, mas não sobrescreve reclaim/finalização posterior.
+3. Na inicialização e em cada poll, reclaimar `PROCESSING` expirado. Sem tentativa para
+   o token, voltar a `PENDING` sem custo; com tentativa aberta, marcar
+   `UNKNOWN`/`WEBHOOK_DELIVERY_LEASE_EXPIRED` e aplicar exatamente a espera ou DLQ da
+   tabela de orçamento acima.
+4. Se `cancelRequestedAt` estiver preenchido, tanto finalização quanto reclaim registram
+   o resultado disponível e concluem `CANCELLED`; não iniciam outra chamada.
+5. Se o crash ocorreu depois de o cliente processar, o retry pode ser duplicata. Ele
    conserva `eventId` e `outboxId`; somente `WebhookDelivery.id` muda.
 
 O valor de 30 segundos, renovação de lease, SQL de claim e relógio autoritativo (banco ou
 processo) são `PROPOSTA_DERIVADA: FDD-PROP-LEASE-001 — EM REVISÃO`. Usar tempo do banco
 é a recomendação para reduzir skew.
+
+### Cancelamento, finalização e replay — PROPOSTA_DERIVADA, EM REVISÃO
+
+- DELETE cancela imediatamente `PENDING`/`RETRY_WAIT` e apenas solicita cancelamento de
+  `PROCESSING`; não há promessa de abortar bytes já enviados.
+- A tentativa em voo sempre conserva seu resultado auditável (`SUCCEEDED`, falha ou
+  `UNKNOWN`). Depois de DELETE, a outbox termina `CANCELLED` e não agenda retry/DLQ.
+- Em corrida finalização/DELETE, operações condicionais garantem que, se a finalização
+  criar `RETRY_WAIT` primeiro, DELETE a cancela; se DELETE preencher
+  `cancelRequestedAt` primeiro, a finalização conclui `CANCELLED`.
+- Em crash após DELETE, reclaim respeita `cancelRequestedAt`: uma tentativa aberta vira
+  `UNKNOWN` consumida e a outbox vira `CANCELLED`; claim sem tentativa também cancela,
+  sem consumir posição.
+- Replay relê e condiciona DLQ, outbox e endpoint na mesma transação. Endpoint removido
+  ou `active=false` retorna `WEBHOOK_REPLAY_ENDPOINT_INACTIVE`, mantém DLQ `OPEN` e não
+  abre ciclo. Replay primeiro seguido de DELETE resulta em outbox `CANCELLED`; DELETE
+  primeiro impede o replay.
+
+Essas regras preservam at-least-once para uma chamada já iniciada: ela pode chegar mesmo
+após DELETE e pode ser duplicada após incerteza, sempre com o mesmo `X-Event-Id`. O que
+se cancela são **novas** chamadas automáticas.
 
 ### Isolamento e idempotência
 
@@ -616,7 +716,7 @@ processo) são `PROPOSTA_DERIVADA: FDD-PROP-LEASE-001 — EM REVISÃO`. Usar tem
   `X-Event-Id` e tornar seus efeitos idempotentes `[FECHADO: EV-TR-010-A a
   EV-TR-010-C]`.
 - Falha de escrita na DLQ ou de finalização não apaga a outbox. Lease expirado torna a
-  unidade novamente observável.
+  unidade observável pelo reclaim, que respeita orçamento e cancelamento.
 
 ## Observabilidade
 
@@ -717,8 +817,8 @@ não capacidade existente.
 
 | Caminho real | Símbolo/comportamento atual | Integração futura proposta |
 | --- | --- | --- |
-| [`prisma/schema.prisma`](../prisma/schema.prisma#L1) | Datasource MySQL; UUID nos principais modelos; `Order` tem `customerId`, `status` e histórico; não há modelos de webhook `[CÓDIGO: EV-CODE-001-A a EV-CODE-001-D]`. | Adicionar os quatro modelos, enums, relações em `Customer`/`User` e índices desta proposta por migration. |
-| [`src/modules/orders/order.service.ts`](../src/modules/orders/order.service.ts#L126) | `OrderService.changeStatus` usa `$transaction`, atualiza estoque/status/histórico e não publica outbox `[CÓDIGO: EV-CODE-002-A a EV-CODE-002-D]`. | Injetar publisher/repository e chamar `publishWebhookEvent(tx, ...)` dentro do callback, depois do estado/histórico e antes do retorno; sem HTTP. Nome é proposta. |
+| [`prisma/schema.prisma`](../prisma/schema.prisma#L1) | Datasource MySQL; UUID nos principais modelos; `Order` tem `customerId`, `status` e histórico; não há modelos de webhook nem sequência causal `[CÓDIGO: EV-CODE-001-A a EV-CODE-001-D]`. | Adicionar os quatro modelos, enums, relações/índices e `Order.webhookSequence` propostos por migration. |
+| [`src/modules/orders/order.service.ts`](../src/modules/orders/order.service.ts#L126) | `OrderService.changeStatus` usa `$transaction`, atualiza estoque/status/histórico e não publica outbox `[CÓDIGO: EV-CODE-002-A a EV-CODE-002-D]`. | Incrementar `webhookSequence` atomicamente junto do status, capturar `orderSequence` e chamar o publisher candidato dentro do callback, antes do retorno e sem HTTP. |
 | [`src/modules/orders/order.status.ts`](../src/modules/orders/order.status.ts#L3) | `canTransition`, `shouldDebitStock` e `shouldReplenishStock` definem transição/estoque `[CÓDIGO: EV-CODE-003-A a EV-CODE-003-C]`. | Reutilizar `OrderStatus` para validar inscrições; não duplicar enum de status. |
 | [`src/app.ts`](../src/app.ts#L26) | `buildControllers` instancia repositories/services/controllers explicitamente e `buildApp` monta `/api/v1` `[CÓDIGO: EV-CODE-004-A, EV-CODE-004-B]`. | Compor `WebhookRepository`, `WebhookService`, publisher e `WebhookController`; passar dependências ao `OrderService`. Esses símbolos ainda não existem. |
 | [`src/routes/index.ts`](../src/routes/index.ts#L13) | `Controllers` e `buildApiRouter` registram módulos explicitamente `[CÓDIGO: EV-CODE-004-B]`. | Acrescentar controller/router de webhook e montar as rotas propostas, incluindo o ramo admin. |
@@ -745,8 +845,9 @@ persistência continua usando MySQL real nos testes de integração.
    `[PROPOSTA_DERIVADA: EV-PROP-FANOUT-001 a EV-PROP-FANOUT-006]`.
 2. Reconciliar cinco tentativas versus cinco retries
    `[QUESTÃO_ABERTA: EV-TR-006-A a EV-TR-006-C]`.
-3. Aprovar head-of-line e lease `[QUESTÃO_ABERTA: EV-AMB-001;
-   PROPOSTA_DERIVADA: EV-PROP-ORDER-001, EV-PROP-FANOUT-006]`.
+3. Aprovar head-of-line, sequência causal e lease `[QUESTÃO_ABERTA: EV-AMB-001;
+   PROPOSTA_DERIVADA: EV-PROP-ORDER-001, EV-PROP-FANOUT-006,
+   FDD-PROP-ORDER-SEQUENCE-001]`.
 4. Fechar bytes, codificação, formato HMAC e operação do grace period
    `[QUESTÃO_ABERTA: EV-AMB-005, EV-AMB-006]`.
 5. Fechar redirects e classificação HTTP/rede `[QUESTÃO_ABERTA: EV-AMB-003,
@@ -764,18 +865,20 @@ persistência continua usando MySQL real nos testes de integração.
 | FDD-AT-04 | Alterar pedido/endpoint depois do commit; payload e URL da unidade continuam iguais ao snapshot original. | integração |
 | FDD-AT-05 | Dois endpoints inscritos; linhas têm `outboxId` distintos e o mesmo `eventId`/payload. | integração |
 | FDD-AT-06 | Retentar e reprocessar DLQ; `eventId` e `outboxId` ficam estáveis, cada chamada recebe novo `deliveryId`, e replay incrementa o ciclo. | integração worker |
-| FDD-AT-07 | Evento A entra em backoff e B do mesmo `orderId` chega depois; B não é claimado até A ter sucesso/DLQ, enquanto evento C de outro pedido avança. | integração/concorrência |
+| FDD-AT-07 | Eventos A e B do mesmo pedido recebem `orderSequence` N/N+1 mesmo com timestamps iguais; enquanto qualquer unidade de A está em backoff, nenhuma unidade de B é claimada, mas evento C de outro pedido avança. | integração/concorrência |
 | FDD-AT-08 | Simular relógio para a tabela proposta; chamadas ficam elegíveis em `0/1m/6m/36m/2h36m/14h36m` e a falha final vai à DLQ. | unitário com fake clock |
-| FDD-AT-09 | Destino excede dez segundos; tentativa registra `WEBHOOK_DELIVERY_TIMEOUT`, agenda retry e chega à DLQ ao esgotar a política aprovada. | integração HTTP |
+| FDD-AT-09 | Destino excede dez segundos; tentativa registra `WEBHOOK_DELIVERY_TIMEOUT`, agenda retry e chega à DLQ ao esgotar a agenda candidata; o resultado só se torna normativo após aprovação. | integração HTTP |
 | FDD-AT-10 | Vetores fixos comprovam que os bytes enviados produzem `X-Signature`; criação/rotação não loga secret e valida o comportamento aprovado durante 24 h. | unitário + integração de segurança |
 | FDD-AT-11 | HTTP, URL malformada e destino SSRF proibido são recusados; corpo de 65.536 bytes é aceito e 65.537 é rejeitado sem truncamento e com rollback. | limites/segurança |
 | FDD-AT-12 | Sem token, as sete rotas retornam 401; `ADMIN` e `OPERATOR` acessam CRUD; somente `ADMIN` recebe 202 no replay e `OPERATOR` recebe 403. | Supertest |
-| FDD-AT-13 | Replay grava `replayedByUserId`, instante e motivo; duas requisições concorrentes produzem um 202 e um 409, sem duplicar ciclo. | integração/concorrência |
+| FDD-AT-13 | Com endpoint ativo, replay grava ator/instante/motivo e duas requisições concorrentes produzem um 202 e um 409; endpoint removido ou inativo produz `WEBHOOK_REPLAY_ENDPOINT_INACTIVE`, mantém DLQ `OPEN`, e corrida DELETE/replay termina em ciclo pendente depois cancelado ou replay recusado. | integração/concorrência |
 | FDD-AT-14 | Criar 101 tentativas mistas; histórico retorna exatamente as 100 mais recentes, ordenadas, com payload, response, duração e sem secrets/assinaturas. | integração API |
-| FDD-AT-15 | Encerrar worker depois do envio e antes da finalização; após expirar lease, tentativa vira `UNKNOWN` e a unidade é reenviada com IDs estáveis. | integração/crash recovery |
-| FDD-AT-16 | Cada linha da classificação aprovada produz `SUCCEEDED`, retry ou DLQ esperado; redirects não são seguidos quando essa proposta for aprovada. | testes parametrizados HTTP/rede |
+| FDD-AT-15 | Parametrizar lease expirado: claim sem `WebhookDelivery` não consome chamada; `UNKNOWN` nas tentativas 1–5 consome a posição e agenda, desde `leaseExpiresAt`, `1m/5m/30m/2h/12h`; `UNKNOWN` na tentativa 6 cria DLQ e nunca cria tentativa 7. | integração/crash recovery + fake clock |
+| FDD-AT-16 | Cada linha da classificação candidata produz `SUCCEEDED`, retry ou DLQ esperado; o resultado e a política de redirects só se tornam normativos após aprovação. | testes parametrizados HTTP/rede |
 | FDD-AT-17 | Métricas cobrem lag, tentativas, duração, respostas, retries, DLQ e lease; labels não contêm IDs/URL; logs correlacionam os três IDs e aplicam redaction. | observabilidade |
 | FDD-AT-18 | Suíte existente de auth/orders continua passando após migration, composição e publicação. | regressão |
+| FDD-AT-19 | DELETE cancela `PENDING`/`RETRY_WAIT`; em `PROCESSING`, não promete abortar a chamada, registra sucesso/falha e finaliza `CANCELLED` sem retry; após crash, reclaim registra `UNKNOWN` e cancela sem nova chamada/DLQ. | integração/concorrência |
+| FDD-AT-20 | Duas mudanças do mesmo pedido com timestamps iguais recebem sequências monotônicas distintas; todo fan-out compartilha a sequência do evento; rollback da transação também desfaz o incremento e UUID nunca decide causalidade. | integração MySQL/concorrência |
 
 O aceite funcional requer também: polling observado a cada dois segundos, worker em
 processo separado e operação com um único worker `[FECHADO: EV-TR-004-A a
@@ -788,11 +891,11 @@ deploy `[FECHADO: EV-TR-019-B]`.
 | Risco | Mitigação/decisão |
 | --- | --- |
 | Contratos abertos serem implementados como fatos | Gates explícitos acima; ADR/FDD atualizados antes de codificar retry, HMAC, grace period, classificação, redirects, lease e head-of-line. |
-| Perda ou duplicação após crash | Outbox transacional, at-least-once, lease/reclaim proposto e IDs estáveis; consumidor deduplica por `X-Event-Id`. |
+| Perda ou duplicação após crash | Outbox transacional, at-least-once, `UNKNOWN` consumindo orçamento, lease/reclaim proposto e IDs estáveis; consumidor deduplica por `X-Event-Id`. |
 | Vazamento de secret/assinatura | Cifragem em repouso a aprovar, retorno one-shot, redaction ampliada, ausência em histórico/métricas/traces e dois dias de revisão de segurança. |
 | SSRF ou redirect para infraestrutura interna | HTTPS, redirect manual proposto e política de resolução/bloqueio a aprovar antes do deploy. |
 | Crescimento/carga no MySQL | Índices, lotes pequenos, métricas de lag/DLQ e single-worker inicial; retenção continua adiada e deve ser acompanhada operacionalmente. |
-| Head-of-line atrasar eventos posteriores | Bloqueio somente por `orderId`, outros pedidos continuam; alertar idade por pedido e revisar proposta com dados reais. |
+| Head-of-line atrasar eventos posteriores | Bloqueio por `orderId`/`orderSequence`, outros pedidos continuam; alertar idade por pedido e revisar proposta com dados reais. |
 | Single-worker limitar disponibilidade/throughput | Monitorar lag e duração; escala multi-worker não é prometida nesta fase `[FECHADO: EV-TR-004-C, EV-TR-005-B]`. |
 | Resposta do cliente conter dados sensíveis ou ser enorme | Sanitizar, propor limite de captura de 16 KiB e nunca registrar headers/secrets; política ainda em revisão. |
 | Rotação tornar retries inválidos | Fechar versão/formato/grace period, adicionar vetores e testes atravessando 24 h antes do rollout. |
