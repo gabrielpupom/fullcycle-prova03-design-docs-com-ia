@@ -294,15 +294,20 @@ nem comportamento durante a rotação e não deve ser tratado como requisito fec
 
 O produto deve disponibilizar sinais operacionais para acompanhar a latência de
 primeira tentativa, resultados, retries, DLQ e replays, com logs estruturados.
-Tracing não é uma capacidade assumida nesta fase.
 
-O conjunto exato de métricas e o backend de observabilidade são propostas derivadas,
-não decisões da reunião. A não exposição de dados sensíveis em logs segue a proposta
-pendente de `PRD-NFR-08`; não é um requisito fechado de observabilidade.
+**PROPOSTA_DERIVADA (`EV-PROP-SLI-001`):** medir o intervalo entre o commit da
+mudança e o início da primeira tentativa, excluindo retries. O conjunto exato de
+métricas e o backend de observabilidade também dependem de aprovação; não são decisões
+da reunião.
 
-**Rastreabilidade:** proposta derivada `EV-PROP-SLI-001` e
-`EV-AMB-007`; fatos da reunião sobre retry, DLQ e replay
-`EV-TR-007-A` e `EV-TR-007-C`.
+**QUESTÃO ABERTA (`EV-AMB-007`):** tracing não existe no projeto e sua dependência e
+integração dependem de decisão futura; portanto, não é uma capacidade assumida nesta
+fase. A não exposição de dados sensíveis em logs segue a proposta pendente de
+`PRD-NFR-08`; não é um requisito fechado de observabilidade.
+
+**Rastreabilidade:** proposta derivada `EV-PROP-SLI-001`; questão aberta
+`EV-AMB-007`; fatos da reunião sobre retry, DLQ e replay `EV-TR-007-A` e
+`EV-TR-007-C`.
 
 ## Decisões e trade-offs principais
 
@@ -330,10 +335,12 @@ pendente de `PRD-NFR-08`; não é um requisito fechado de observabilidade.
   durante backoff não foi decidido. **Head-of-line blocking por pedido é somente uma
   proposta derivada**, com o custo de atrasar eventos posteriores daquele pedido.
 - Rate limiting de envio permanece aberto e adiado.
+- Tracing não existe no projeto; adotar uma dependência e integrá-la aos processos da
+  API e do worker depende de decisão futura.
 
 **Rastreabilidade:** `EV-TR-003-A`, `EV-TR-004-C`, `EV-TR-005-B`,
 `EV-TR-006-A`, `EV-AMB-001`, `EV-AMB-003`, `EV-AMB-005`,
-`EV-AMB-006` e `EV-PROP-ORDER-001`.
+`EV-AMB-006`, `EV-AMB-007` e `EV-PROP-ORDER-001`.
 
 ## Dependências
 

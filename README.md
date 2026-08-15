@@ -65,7 +65,11 @@ que a reunião não decidiu e não aceite nomes de arquivos inexistentes.
 
 ## Iterações e ajustes
 
-Foram **7 iterações principais**, correspondentes às entregas matriz, ADRs, RFC, FDD, PRD, Tracker e README, além de uma etapa preliminar de spec. A revisão independente do Sol encontrou, na primeira spec estrutural, ambiguidades de retry/ordering e um checklist incompleto; a spec foi corrigida com catálogo, propostas derivadas e checklist integral.
+Foram **8 iterações principais**: as sete entregas de matriz, ADRs, RFC, FDD, PRD,
+Tracker e README, mais uma onda final de correção da revisão global, além de uma etapa
+preliminar de spec. A revisão independente do Sol encontrou, na primeira spec
+estrutural, ambiguidades de retry/ordering e um checklist incompleto; a spec foi
+corrigida com catálogo, propostas derivadas e checklist integral.
 
 - **Matriz:** a revisão encontrou generalização incorreta de UUID e referências internas incompletas; o conteúdo foi corrigido em 1 rodada.
 - **ADRs e RFC:** passaram na primeira revisão de tarefa.
@@ -73,6 +77,9 @@ Foram **7 iterações principais**, correspondentes às entregas matriz, ADRs, R
 - **PRD:** a revisão encontrou redaction e listagem sem secret tratadas como aceites fechados; a classificação foi corrigida em 1 rodada.
 - **Tracker:** a revisão encontrou timestamps insuficientes, fonte `CODIGO` indevida, caminhos compostos insuficientes e redaction sem `PROPOSTA_DERIVADA`; os registros foram corrigidos em 1 rodada.
 - **README:** a última iteração consolidou o histórico, separou ferramentas de IA das auxiliares e conferiu a navegação sem alterar os documentos ou a aplicação.
+- **Revisão global final:** a oitava iteração acrescentou exemplos JSON aos sete
+  contratos, corrigiu a semântica não retroativa do PATCH e separou tracing aberto do
+  SLI proposto, com recálculo do Tracker.
 
 ## Como navegar a entrega
 

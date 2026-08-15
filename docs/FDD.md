@@ -256,7 +256,8 @@ Toda a tabela é `PROPOSTA_DERIVADA: FDD-PROP-STATES-001 — EM REVISÃO`.
    pedido, histórico, estoque e outbox `[FECHADO: EV-TR-009-B, EV-TR-017-A;
    PROPOSTA_DERIVADA: FDD-PROP-64K-001 — EM REVISÃO]`.
 6. Para cada endpoint inscrito, cria-se uma `WebhookOutbox` com `id` próprio, os mesmos
-   `eventId` e `orderSequence`, payload idêntico e snapshots de URL/configuração. Uma
+   `eventId` e `orderSequence`, payload idêntico e o snapshot `endpointUrl`. A lista de
+   status serve apenas para decidir a elegibilidade antes da criação das unidades. Uma
    falha em qualquer inserção aborta todo o fan-out e a transação
    `[PROPOSTA_DERIVADA: EV-PROP-FANOUT-002, EV-PROP-FANOUT-003]`.
 7. Somente depois do commit o worker pode observar as linhas. Nenhuma chamada HTTP é
@@ -338,12 +339,35 @@ ownership por customer a ser inferida silenciosamente.
 
 - **Autenticação:** Bearer JWT; `ADMIN` ou `OPERATOR`, sem inferir `customerId` do token
   `[FECHADO: EV-TR-012-C, EV-TR-012-D, EV-TR-015-C]`.
-- **Request:** path `customerId` UUID; body
-  `{"url":"https://cliente.example/webhooks/orders","statuses":["PAID","SHIPPED"]}`.
+- **Headers necessários:** `Authorization: Bearer <JWT>` e
+  `Content-Type: application/json`.
+- **Path:** `customerId=7b8179cd-5c8a-48db-946c-e73cd13d853a`.
+- **Request body:**
+
+  ```json
+  {
+    "url": "https://cliente.example/webhooks/orders",
+    "statuses": ["PAID", "SHIPPED"]
+  }
+  ```
+
   `statuses` é não vazio, sem duplicatas e limitado ao `OrderStatus` existente.
-- **Response `201`:** configuração sanitizada com `id`, `customerId`, `url`, `statuses`,
-  `active`, `createdAt` e `secret`. A secret é gerada pelo sistema e exibida em texto
-  claro somente nesta resposta `[FECHADO: EV-TR-012-A, EV-TR-012-B]`.
+- **Response body (`201`):**
+
+  ```json
+  {
+    "id": "8f67fd18-42b3-487f-a7d8-d68172c2826d",
+    "customerId": "7b8179cd-5c8a-48db-946c-e73cd13d853a",
+    "url": "https://cliente.example/webhooks/orders",
+    "statuses": ["PAID", "SHIPPED"],
+    "active": true,
+    "createdAt": "2026-08-15T18:40:00.000Z",
+    "secret": "c2VjdXJlLXJhbmRvbS0zMi1ieXRlLXZhbHVl"
+  }
+  ```
+
+  A secret é gerada pelo sistema e exibida em texto claro somente nesta resposta
+  `[FECHADO: EV-TR-012-A, EV-TR-012-B]`.
 - **Status codes:** `201`; `400 WEBHOOK_INVALID_URL` ou `WEBHOOK_INVALID_STATUS`;
   `401`; `404 NOT_FOUND` para customer inexistente; `500 WEBHOOK_SECRET_GENERATION_FAILED`.
 - **Semântica:** persiste endpoint e secret cifrada atomicamente; nunca retorna os
@@ -353,12 +377,36 @@ ownership por customer a ser inferida silenciosamente.
 
 - **Autenticação:** Bearer JWT; `ADMIN` ou `OPERATOR`
   `[FECHADO: EV-TR-012-C, EV-TR-015-C]`.
-- **Request:** path `customerId` UUID; query candidata `page` (default 1) e `pageSize`
-  (default 20, máximo 100); sem body.
-- **Response `200`:** objeto com `data`, uma lista de configurações sanitizadas contendo
-  `id`, `customerId`, `url`, `statuses`, `active`, `createdAt` e `updatedAt`, e
-  `pagination` com `page`, `pageSize`, `total` e `totalPages`; sem secret atual/anterior
-  ou material cifrado.
+- **Headers necessários:** `Authorization: Bearer <JWT>`.
+- **Path:** `customerId=7b8179cd-5c8a-48db-946c-e73cd13d853a`.
+- **Query do exemplo:** `page=1&pageSize=20`; os defaults são 1 e 20, e o máximo de
+  `pageSize` é 100.
+- **Request body:** não se aplica.
+- **Response body (`200`):**
+
+  ```json
+  {
+    "data": [
+      {
+        "id": "8f67fd18-42b3-487f-a7d8-d68172c2826d",
+        "customerId": "7b8179cd-5c8a-48db-946c-e73cd13d853a",
+        "url": "https://cliente.example/webhooks/orders",
+        "statuses": ["PAID", "SHIPPED"],
+        "active": true,
+        "createdAt": "2026-08-15T18:40:00.000Z",
+        "updatedAt": "2026-08-15T18:40:00.000Z"
+      }
+    ],
+    "pagination": {
+      "page": 1,
+      "pageSize": 20,
+      "total": 1,
+      "totalPages": 1
+    }
+  }
+  ```
+
+  A resposta não contém secret atual/anterior nem material cifrado.
 - **Status codes:** `200`; `400 VALIDATION_ERROR`; `401`; `404 NOT_FOUND` para customer
   inexistente.
 - **Semântica:** lista configurações não removidas daquele customer, ordenadas por
@@ -368,22 +416,53 @@ ownership por customer a ser inferida silenciosamente.
 
 - **Autenticação:** Bearer JWT; `ADMIN` ou `OPERATOR`
   `[FECHADO: EV-TR-012-C, EV-TR-015-C]`.
-- **Request:** path `id` UUID; body parcial com pelo menos um de `url`, `statuses` ou
-  `active`, usando as mesmas validações da criação.
-- **Response `200`:** configuração sanitizada atualizada, sem secrets.
+- **Headers necessários:** `Authorization: Bearer <JWT>` e
+  `Content-Type: application/json`.
+- **Path:** `id=8f67fd18-42b3-487f-a7d8-d68172c2826d`.
+- **Request body:** parcial, com pelo menos um de `url`, `statuses` ou `active`, usando
+  as mesmas validações da criação. Exemplo completo com os três campos:
+
+  ```json
+  {
+    "url": "https://cliente.example/webhooks/orders-v2",
+    "statuses": ["PAID", "SHIPPED", "DELIVERED"],
+    "active": true
+  }
+  ```
+
+- **Response body (`200`):**
+
+  ```json
+  {
+    "id": "8f67fd18-42b3-487f-a7d8-d68172c2826d",
+    "customerId": "7b8179cd-5c8a-48db-946c-e73cd13d853a",
+    "url": "https://cliente.example/webhooks/orders-v2",
+    "statuses": ["PAID", "SHIPPED", "DELIVERED"],
+    "active": true,
+    "createdAt": "2026-08-15T18:40:00.000Z",
+    "updatedAt": "2026-08-15T19:05:00.000Z"
+  }
+  ```
+
+  A configuração é sanitizada e não contém secrets.
 - **Status codes:** `200`; `400 WEBHOOK_INVALID_URL`, `WEBHOOK_INVALID_STATUS` ou
   `VALIDATION_ERROR`; `401`; `404 WEBHOOK_ENDPOINT_NOT_FOUND`; `409
   WEBHOOK_ENDPOINT_DISABLED` quando a transição solicitada não for permitida.
-- **Semântica:** alteração afeta apenas novos eventos. URL e lista já copiadas para
-  outboxes existentes não mudam retroativamente
+- **Semântica:** mudanças em `statuses` ou `active` afetam somente a elegibilidade de
+  eventos futuros; elas não criam nem cancelam retroativamente unidades de outbox já
+  existentes, pois a lista de status não é copiada para `WebhookOutbox`. Uma mudança
+  de URL vale para unidades futuras; somente o `endpointUrl` já materializado em cada
+  unidade existente permanece imutável
   `[PROPOSTA_DERIVADA: FDD-PROP-ENDPOINT-SNAPSHOT-001 — EM REVISÃO]`.
 
 ### DELETE /api/v1/webhooks/:id — PROPOSTA_DERIVADA
 
 - **Autenticação:** Bearer JWT; `ADMIN` ou `OPERATOR`
   `[FECHADO: EV-TR-012-C, EV-TR-015-C]`.
-- **Request:** path `id` UUID; sem body.
-- **Response `204`:** sem corpo.
+- **Headers necessários:** `Authorization: Bearer <JWT>`.
+- **Path:** `id=8f67fd18-42b3-487f-a7d8-d68172c2826d`.
+- **Request body:** não se aplica.
+- **Response body (`204`):** não há response body; o servidor devolve o corpo vazio.
 - **Status codes:** `204`; `400 VALIDATION_ERROR`; `401`; `404
   WEBHOOK_ENDPOINT_NOT_FOUND`.
 - **Semântica proposta:** na mesma transação, remoção lógica (`active=false`,
@@ -396,15 +475,27 @@ ownership por customer a ser inferida silenciosamente.
   concorrerem, updates condicionais serializam dois resultados válidos: finalização
   anterior pode produzir `RETRY_WAIT`, que DELETE cancela; DELETE anterior define
   `cancelRequestedAt`, que a finalização respeita. Esta política é
-  `PROPOSTA_DERIVADA: FDD-PROP-DELETE-001 — EM REVISÃO`.
+  `PROPOSTA_DERIVADA: FDD-PROP-DELETE-001 — EM REVISÃO`. Esse cancelamento é específico
+  do DELETE; alterar `active` via PATCH não cancela unidades existentes.
 
 ### POST /api/v1/webhooks/:id/rotate-secret — PROPOSTA_DERIVADA
 
 - **Autenticação:** Bearer JWT; `ADMIN` ou `OPERATOR`
   `[FECHADO: EV-TR-012-C, EV-TR-015-C]`.
-- **Request:** path `id` UUID; sem body.
-- **Response `200`:** objeto com `id` UUID, `secret` opaca exibida uma única vez e
-  `previousSecretValidUntil` em ISO 8601; não retorna a secret anterior.
+- **Headers necessários:** `Authorization: Bearer <JWT>`.
+- **Path:** `id=8f67fd18-42b3-487f-a7d8-d68172c2826d`.
+- **Request body:** não se aplica.
+- **Response body (`200`):**
+
+  ```json
+  {
+    "id": "8f67fd18-42b3-487f-a7d8-d68172c2826d",
+    "secret": "bm92YS1zZWNyZXQtYWxlYXRvcmlhLWRlLTMyLWJ5dGVz",
+    "previousSecretValidUntil": "2026-08-16T19:10:00.000Z"
+  }
+  ```
+
+  A secret é opaca, aparece uma única vez e a resposta não retorna a secret anterior.
 - **Status codes:** `200`; `400 VALIDATION_ERROR`; `401`; `404
   WEBHOOK_ENDPOINT_NOT_FOUND`; `409 WEBHOOK_SECRET_ROTATION_CONFLICT`; `500
   WEBHOOK_SECRET_GENERATION_FAILED`.
@@ -419,12 +510,49 @@ ownership por customer a ser inferida silenciosamente.
 
 - **Autenticação:** Bearer JWT; `ADMIN` ou `OPERATOR`
   `[FECHADO: EV-TR-012-C, EV-TR-015-C]`.
-- **Request:** path `id` UUID; sem body. O limite é fixo em 100 nesta fase.
-- **Response `200`:** objeto com `data` em `startedAt desc`, contendo até 100 entradas.
-  Cada entrada contém `deliveryId`, `outboxId`, `eventId`, `attemptNumber`,
-  `replayCycle`, `outcome`, `payload`, `httpStatus`, `responseBody`,
-  `responseTruncated`, `durationMs`, `errorCode`, `startedAt` e `finishedAt`. Nunca
-  inclui secret, assinatura ou headers sensíveis.
+- **Headers necessários:** `Authorization: Bearer <JWT>`.
+- **Path:** `id=8f67fd18-42b3-487f-a7d8-d68172c2826d`.
+- **Request body:** não se aplica. O limite é fixo em 100 nesta fase.
+- **Response body (`200`):**
+
+  ```json
+  {
+    "data": [
+      {
+        "deliveryId": "d976cc6f-46bd-4c0a-83a7-53db830bc28c",
+        "outboxId": "b2ce615e-ad15-46d4-bde6-5b1760375ae8",
+        "eventId": "6f9ad87e-08f4-4eca-9f2d-c5976686f123",
+        "attemptNumber": 1,
+        "replayCycle": 0,
+        "outcome": "SUCCEEDED",
+        "payload": {
+          "event_id": "6f9ad87e-08f4-4eca-9f2d-c5976686f123",
+          "type": "order.status_changed",
+          "timestamp": "2026-08-15T18:42:31.123Z",
+          "customer_id": "7b8179cd-5c8a-48db-946c-e73cd13d853a",
+          "data": {
+            "order_id": "26a0ae6d-0927-41f8-9a82-906f9e75b48f",
+            "order_number": "ORD-000123",
+            "from_status": "PENDING",
+            "to_status": "PAID",
+            "changed_at": "2026-08-15T18:42:31.123Z",
+            "reason": "payment confirmed"
+          }
+        },
+        "httpStatus": 200,
+        "responseBody": "{\"received\":true}",
+        "responseTruncated": false,
+        "durationMs": 284,
+        "errorCode": null,
+        "startedAt": "2026-08-15T18:42:31.400Z",
+        "finishedAt": "2026-08-15T18:42:31.684Z"
+      }
+    ]
+  }
+  ```
+
+  As entradas vêm em `startedAt desc`, até o limite de 100, e nunca incluem secret,
+  assinatura ou headers sensíveis.
 - **Status codes:** `200`; `400 VALIDATION_ERROR`; `401`; `404
   WEBHOOK_ENDPOINT_NOT_FOUND`.
 - **Semântica:** inclui sucesso e falha, payload, response e duração conforme requisito
@@ -435,10 +563,29 @@ ownership por customer a ser inferida silenciosamente.
 
 - **Autenticação:** Bearer JWT seguido de `requireRole('ADMIN')`; `OPERATOR` recebe 403
   `[FECHADO: EV-TR-015-A; CÓDIGO: EV-CODE-005-B]`.
-- **Request:** path `id` UUID da DLQ; body candidato
-  `{"reason":"endpoint do cliente recuperado"}` com 1 a 500 caracteres.
-- **Response `202`:** objeto com `deadLetterId`, `outboxId` e `eventId` UUID,
-  `status="PENDING"` e `replayCycle` inteiro incrementado.
+- **Headers necessários:** `Authorization: Bearer <JWT>` e
+  `Content-Type: application/json`.
+- **Path:** `id=5115c13a-65f3-4bde-bc17-508c4b77f756`, UUID da DLQ.
+- **Request body:** candidato com `reason` de 1 a 500 caracteres.
+
+  ```json
+  {
+    "reason": "endpoint do cliente recuperado"
+  }
+  ```
+
+- **Response body (`202`):**
+
+  ```json
+  {
+    "deadLetterId": "5115c13a-65f3-4bde-bc17-508c4b77f756",
+    "outboxId": "ba22d690-24f1-4c2f-8214-d26723bc3ed4",
+    "eventId": "80c1d489-a5b1-4a91-aa2c-1c78f617d398",
+    "status": "PENDING",
+    "replayCycle": 1
+  }
+  ```
+
 - **Status codes:** `202`; `400 VALIDATION_ERROR`; `401`; `403`; `404
   WEBHOOK_DLQ_NOT_FOUND`; `409 WEBHOOK_REPLAY_CONFLICT` ou
   `WEBHOOK_REPLAY_ENDPOINT_INACTIVE`; `500 WEBHOOK_REPLAY_FAILED`.
@@ -862,7 +1009,7 @@ persistência continua usando MySQL real nos testes de integração.
 | FDD-AT-01 | Forçar falha na inserção da outbox em `changeStatus`; pedido, histórico e efeitos de estoque permanecem no estado anterior, sem linha parcial. | integração MySQL |
 | FDD-AT-02 | Mudar para status sem endpoint inscrito; commit ocorre e a contagem de outbox permanece zero. | integração |
 | FDD-AT-03 | Dois endpoints ativos, apenas um inscrito no novo status; criar exatamente uma unidade para o inscrito. | integração |
-| FDD-AT-04 | Alterar pedido/endpoint depois do commit; payload e URL da unidade continuam iguais ao snapshot original. | integração |
+| FDD-AT-04 | Depois do commit, alterar pedido, URL, `statuses` e `active`; payload e `endpointUrl` da unidade continuam iguais, e a mudança de inscrição não cria nem cancela unidades existentes. | integração |
 | FDD-AT-05 | Dois endpoints inscritos; linhas têm `outboxId` distintos e o mesmo `eventId`/payload. | integração |
 | FDD-AT-06 | Retentar e reprocessar DLQ; `eventId` e `outboxId` ficam estáveis, cada chamada recebe novo `deliveryId`, e replay incrementa o ciclo. | integração worker |
 | FDD-AT-07 | Eventos A e B do mesmo pedido recebem `orderSequence` N/N+1 mesmo com timestamps iguais; enquanto qualquer unidade de A está em backoff, nenhuma unidade de B é claimada, mas evento C de outro pedido avança. | integração/concorrência |
