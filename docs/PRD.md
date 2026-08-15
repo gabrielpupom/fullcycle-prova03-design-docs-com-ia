@@ -123,10 +123,14 @@ restrição adicional a `ADMIN` vale para o replay administrativo.
 ### PRD-FR-02 — Listar configurações de webhook
 
 O produto deve permitir que uma pessoa autenticada consulte as configurações de
-webhook cadastradas para um cliente, sem expor a secret de operação.
+webhook cadastradas para um cliente.
 
-**Rastreabilidade:** fato da reunião sobre CRUD autenticado
-`EV-TR-012-C`.
+**PROPOSTA_DERIVADA — pendente de aprovação:** a listagem apresenta configurações
+sanitizadas, sem expor a secret de operação. Esse comportamento está proposto no FDD,
+mas não foi fechado pela reunião e não deve ser tratado como requisito aceito.
+
+**Rastreabilidade:** fato da reunião sobre CRUD autenticado `EV-TR-012-C`;
+proposta derivada `FDD-PROP-API-001`.
 
 ### PRD-FR-03 — Editar configuração de webhook
 
@@ -194,10 +198,14 @@ falhas não são fechados por este requisito.
 ### PRD-FR-10 — Consultar histórico recente de entregas
 
 O produto deve permitir consultar as últimas 100 entregas de uma configuração,
-incluindo resultados de sucesso ou falha, payload, resposta e duração, sem expor
-material secreto.
+incluindo resultados de sucesso ou falha, payload, resposta e duração.
 
-**Rastreabilidade:** fato da reunião `EV-TR-014-A`.
+**PROPOSTA_DERIVADA — pendente de aprovação:** a consulta não expõe secret ou
+assinatura. É um controle de segurança desejável, mas não foi fechado pela reunião e
+não integra o comportamento aceito desta fase.
+
+**Rastreabilidade:** fato da reunião `EV-TR-014-A`; proposta derivada
+`FDD-PROP-API-001` e `PRD-NFR-08`.
 
 ### PRD-FR-11 — Reprocessar DLQ de forma administrativa e auditável
 
@@ -272,12 +280,12 @@ outbox, evitando que tentativas posteriores alterem o fato de negócio comunicad
 
 ### PRD-NFR-08 — Segurança de secrets e assinaturas
 
-Cada endpoint deve ter secret própria, com rotação de 24 horas de convivência. A
-secret e a assinatura não devem aparecer em histórico, logs ou métricas.
+Cada endpoint deve ter secret própria, com rotação de 24 horas de convivência.
 
-A não exposição em canais operacionais é uma **proposta derivada de segurança** para
-cumprir a decisão de secret por endpoint; ela não define armazenamento, formato de
-assinatura ou comportamento durante a rotação.
+**PROPOSTA_DERIVADA — pendente de aprovação:** secret e assinatura não aparecem em
+histórico, logs ou métricas. Esse é o controle de segurança desejável para cumprir a
+decisão de secret por endpoint, mas não define armazenamento, formato de assinatura
+nem comportamento durante a rotação e não deve ser tratado como requisito fechado.
 
 **Rastreabilidade:** fato da reunião `EV-TR-008-A`, `EV-TR-008-B` e
 `EV-TR-008-C`; proposta derivada baseada em `EV-CODE-007-C`.
@@ -285,11 +293,12 @@ assinatura ou comportamento durante a rotação.
 ### PRD-NFR-09 — Observabilidade operacional
 
 O produto deve disponibilizar sinais operacionais para acompanhar a latência de
-primeira tentativa, resultados, retries, DLQ e replays, com logs estruturados e
-sem dados sensíveis. Tracing não é uma capacidade assumida nesta fase.
+primeira tentativa, resultados, retries, DLQ e replays, com logs estruturados.
+Tracing não é uma capacidade assumida nesta fase.
 
 O conjunto exato de métricas e o backend de observabilidade são propostas derivadas,
-não decisões da reunião.
+não decisões da reunião. A não exposição de dados sensíveis em logs segue a proposta
+pendente de `PRD-NFR-08`; não é um requisito fechado de observabilidade.
 
 **Rastreabilidade:** proposta derivada `EV-PROP-SLI-001` e
 `EV-AMB-007`; fatos da reunião sobre retry, DLQ e replay
@@ -367,8 +376,12 @@ explicitamente identificadas. Questões abertas não foram convertidas em aceite
 
 - **PRD-AC-01 — Gestão autenticada:** uma pessoa autenticada consegue cadastrar,
   listar, editar, remover e rotacionar configurações de webhook; a secret é exibida
-  na criação, não na listagem, e a rotação preserva a validade da secret anterior por
-  24 horas. Rastreia `PRD-FR-01` a `PRD-FR-05`.
+  na criação, e a rotação preserva a validade da secret anterior por 24 horas.
+  Rastreia `PRD-FR-01` a `PRD-FR-05`.
+
+  **Proposta derivada — pendente de aprovação:** a não exposição da secret na
+  listagem é desejável e é rastreada por `PRD-FR-02`, mas fica fora deste critério
+  fechado até aprovação.
 - **PRD-AC-02 — Elegibilidade e publicação:** uma mudança de status com inscrição
   aplicável gera publicação na outbox; sem inscrição aplicável, não gera. Rastreia
   `PRD-FR-06`, `PRD-FR-07` e `PRD-NFR-01`.
@@ -385,8 +398,12 @@ explicitamente identificadas. Questões abertas não foram convertidas em aceite
   permanece vinculado ao momento de publicação. Rastreia `PRD-FR-12`,
   `PRD-NFR-06` e `PRD-NFR-07`.
 - **PRD-AC-06 — Histórico observável:** a consulta retorna no máximo as 100 entregas
-  mais recentes com resultado, payload, resposta e duração, sem secret ou assinatura.
-  Rastreia `PRD-FR-10` e `PRD-NFR-08`.
+  mais recentes com resultado, payload, resposta e duração. Rastreia
+  `PRD-FR-10`.
+
+  **Controle de segurança proposto — pendente de aprovação:** não expor secret ou
+  assinatura no histórico é desejável e é rastreado por `PRD-NFR-08`, mas fica fora
+  deste critério fechado até aprovação.
 - **PRD-AC-07 — Evidência de latência:** em validação controlada, é registrado o
   intervalo proposto entre commit da mudança e início da primeira tentativa e o
   cenário validado fica abaixo de 10 segundos. Isso não estabelece percentil, SLO ou
@@ -405,7 +422,7 @@ aproximadamente 30 dias.
 
 | Frente de validação | Cenários de produto | Resultado esperado |
 | --- | --- | --- |
-| Gestão de configuração | Criar, listar, editar, remover e rotacionar uma configuração autenticada. | O ciclo é utilizável sem expor secrets fora dos momentos permitidos. |
+| Gestão de configuração | Criar, listar, editar, remover e rotacionar uma configuração autenticada. | O ciclo é utilizável para a pessoa autenticada. |
 | Notificação elegível | Mudar status com e sem inscrição correspondente. | Só a mudança elegível é publicada e preparada para entrega. |
 | Consistência | Induzir falha na publicação associada à mudança de status. | Não há confirmação parcial entre a mudança, o histórico e a publicação. |
 | Entrega e segurança | Exercitar destino HTTPS, assinatura HMAC, limite de payload e timeout. | As restrições fechadas são respeitadas sem detalhar formatos que permanecem abertos. |
