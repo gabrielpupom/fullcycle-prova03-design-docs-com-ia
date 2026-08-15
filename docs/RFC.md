@@ -7,8 +7,8 @@
 - **Data:** 2026-08-15
 - **Revisores:** Larissa, Marcos, Bruno, Diego e Sofia
 
-Este documento consolida a proposta arquitetural a partir dos ADRs aprovados e da
-[matriz de evidências](superpowers/evidence/evidence-matrix.md). Decisões já fechadas
+Este documento consolida a proposta arquitetural a partir dos ADRs aprovados e do
+[Tracker de rastreabilidade](TRACKER.md). Decisões já fechadas
 referenciam essas fontes; detalhes ainda não decididos permanecem explicitamente abertos
 ou identificados como propostas derivadas para revisão.
 
@@ -17,7 +17,7 @@ ou identificados como propostas derivadas para revisão.
 Propõe-se uma capacidade de webhooks **outbound** para comunicar mudanças de status de
 pedidos aos clientes B2B, sem receber webhooks desses clientes. A referência de negócio
 para a entrega é abaixo de dez segundos
-([matriz de evidências](superpowers/evidence/evidence-matrix.md)). Para cumprir esse objetivo sem tornar a
+([Tracker de rastreabilidade](TRACKER.md)). Para cumprir esse objetivo sem tornar a
 mudança de status dependente da disponibilidade de um endpoint externo, o evento será
 registrado em uma outbox no MySQL na mesma transação da alteração do pedido e do
 histórico. A entrega HTTP ocorrerá depois, fora da transação, por um worker separado.
@@ -43,7 +43,7 @@ pontos requerem revisão antes de orientar o contrato outbound ou a implementaç
 
 Os clientes precisam ser avisados quando um pedido muda de status, mas a aplicação atual
 não possui modelos de webhook, outbox, entrega ou DLQ, nem publica esse tipo de evento no
-fluxo de status ([matriz de evidências](superpowers/evidence/evidence-matrix.md)). Ao mesmo tempo, a alteração de pedido e seu histórico já compartilham um
+fluxo de status ([Tracker de rastreabilidade](TRACKER.md)). Ao mesmo tempo, a alteração de pedido e seu histórico já compartilham um
 limite transacional no MySQL. Fazer uma chamada HTTP síncrona dentro desse limite faria o
 resultado de uma operação de negócio depender da latência, disponibilidade e semântica de
 rollback de sistemas externos. A outbox foi escolhida justamente para remover essa janela
@@ -96,7 +96,7 @@ administrativo e deve preservar a auditabilidade da ação. O timeout de dez seg
 conhecido como falha de entrega para retry; a classificação completa das demais respostas
 e falhas permanece aberta e será definida em revisão posterior
 ([ADR-002](adrs/ADR-002-retry-com-backoff-e-dlq.md),
-[matriz de evidências](superpowers/evidence/evidence-matrix.md)).
+[Tracker de rastreabilidade](TRACKER.md)).
 
 ### Segurança e integração modular
 
@@ -107,7 +107,7 @@ limita o alcance de um vazamento, enquanto a rotação evita uma troca abrupta d
 credencial. A serialização assinada, o formato do header e o uso das secrets durante a
 convivência não são inferidos aqui, porque não foram decididos
 ([ADR-003](adrs/ADR-003-hmac-sha256-por-endpoint.md),
-[matriz de evidências](superpowers/evidence/evidence-matrix.md)).
+[Tracker de rastreabilidade](TRACKER.md)).
 
 Webhooks serão um novo módulo que segue as fronteiras já usadas pela aplicação:
 controller, service, repository, routes e schemas, com Prisma, Zod, autenticação,
@@ -172,7 +172,7 @@ usarão o prefixo `WEBHOOK_` ([ADR-006](adrs/ADR-006-reuso-dos-padroes-existente
 5. **Rate limiting futuro.** Não há requisito fechado de limitação de envio nesta fase.
    O comportamento deve ser observado e decidido posteriormente com base na operação e
    nos limites dos clientes; esta RFC não introduz quotas, filas adicionais ou regra de
-   throttling sem essa decisão ([matriz de evidências](superpowers/evidence/evidence-matrix.md)).
+   throttling sem essa decisão ([Tracker de rastreabilidade](TRACKER.md)).
 
 ## Impacto e riscos
 
@@ -196,7 +196,7 @@ dados sensíveis e devem ser reservados dois dias úteis para revisão de segura
 necessidade de tracing continua uma possibilidade futura, não uma capacidade assumida
 ([ADR-003](adrs/ADR-003-hmac-sha256-por-endpoint.md),
 [ADR-006](adrs/ADR-006-reuso-dos-padroes-existentes.md),
-[matriz de evidências](superpowers/evidence/evidence-matrix.md)).
+[Tracker de rastreabilidade](TRACKER.md)).
 
 O single-worker simplifica a fase inicial, mas limita throughput e disponibilidade e não
 cria garantia global de ordering. A equipe deve monitorar a meta de entrega e a
@@ -204,7 +204,7 @@ pressão no banco antes de propor escala horizontal ou rate limiting. O prazo es
 de três sprints; o risco de escopo cresce se as cinco questões abertas não forem
 resolvidas durante a revisão arquitetural
 ([ADR-005](adrs/ADR-005-worker-separado-com-polling.md),
-[matriz de evidências](superpowers/evidence/evidence-matrix.md)).
+[Tracker de rastreabilidade](TRACKER.md)).
 
 ## Decisões relacionadas
 

@@ -9,7 +9,7 @@ webhooks como capacidade já existente.
 [ADR-004](adrs/ADR-004-at-least-once-com-x-event-id.md),
 [ADR-005](adrs/ADR-005-worker-separado-com-polling.md),
 [ADR-006](adrs/ADR-006-reuso-dos-padroes-existentes.md) e
-[matriz de evidências](superpowers/evidence/evidence-matrix.md).
+[Tracker de rastreabilidade](TRACKER.md).
 
 ### Convenções de decisão e rastreabilidade
 
@@ -826,7 +826,7 @@ não capacidade existente.
 | [`src/middlewares/validate.middleware.ts`](../src/middlewares/validate.middleware.ts#L11) | `validate` parseia body/query/params e converte `ZodError` em `ValidationError` `[CÓDIGO: EV-CODE-006-A]`. | Criar schemas de UUID, URL HTTPS, status, PATCH e replay; erros específicos de domínio exigem adaptação além do Zod genérico. |
 | [`src/shared/errors/http-errors.ts`](../src/shared/errors/http-errors.ts#L1) | Classes herdam de `AppError`; validação usa `VALIDATION_ERROR` e ausência usa `NOT_FOUND` `[CÓDIGO: EV-CODE-006-B a EV-CODE-006-D]`. | Adicionar/exportar classes `WEBHOOK_*` da matriz futura sem alegar que já existem. |
 | [`src/shared/logger/index.ts`](../src/shared/logger/index.ts#L4) | `createLogger` usa Pino/redaction; lista atual não cobre secrets ou assinatura `[CÓDIGO: EV-CODE-007-A a EV-CODE-007-C]`. | Reutilizar logger e ampliar redaction antes de qualquer log do worker. |
-| [`src/server.ts`](../src/server.ts#L6) | `bootstrap` inicia HTTP e trata SIGINT/SIGTERM `[CÓDIGO: EV-CODE-008-A]`. | Espelhar lifecycle em entrypoint separado candidato `src/worker.ts`, com `PrismaClient` próprio e shutdown que pare polling, aguarde tentativa e desconecte. O caminho é proposta. |
+| [`src/server.ts`](../src/server.ts#L6) | `bootstrap` inicia HTTP e trata SIGINT/SIGTERM `[CÓDIGO: EV-CODE-008-A]`. | Espelhar lifecycle em um entrypoint separado candidato para o worker, com `PrismaClient` próprio e shutdown que pare polling, aguarde tentativa e desconecte. O caminho exato ainda é proposta. |
 | [`package.json`](../package.json#L10) | Há scripts da API/testes, sem script de worker nem tracing `[CÓDIGO: EV-CODE-008-B, EV-CODE-008-C]`. | Adicionar futuramente scripts de dev/build/start do worker e dependência de métricas escolhida; tracing somente após decisão. |
 | [`tests/orders.test.ts`](../tests/orders.test.ts#L1) | Usa Vitest, Supertest e Prisma real; testa transição de status e rollback de estoque por efeitos observáveis `[CÓDIGO: EV-CODE-009-A]`. | Seguir o padrão para API e atomicidade; estender limpeza/factories para as novas tabelas, sem mocks na integração SQL. |
 

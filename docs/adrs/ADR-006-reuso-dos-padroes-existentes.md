@@ -53,8 +53,8 @@ Erros específicos do domínio usarão o prefixo `WEBHOOK_`, conforme definido n
 - Criar um entrypoint próprio para o processo do worker e seu ciclo de shutdown. O
   padrão de bootstrap existente está em [`bootstrap`](../../src/server.ts#L6), mas o
   manifest atual só possui scripts da API
-  ([`package.json`](../../package.json#L10-L20)). `src/worker.ts` foi sugerido na reunião;
-  o caminho exato ainda é detalhe de implementação
+  ([`package.json`](../../package.json#L10-L20)). Um entrypoint próprio do worker foi
+  sugerido na reunião; o caminho exato ainda é detalhe de implementação
   ([transcrição, 09:11](../../TRANSCRICAO.md#L70-L76) e
   [09:28](../../TRANSCRICAO.md#L162-L168)).
 - Reutilizar Pino para eventos operacionais de entrega e definir métricas próprias de
